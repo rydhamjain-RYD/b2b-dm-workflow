@@ -40,6 +40,10 @@ writeFileSync(path.join(fn, ".vc-config.json"), JSON.stringify({
   regions: [region],
 }, null, 2));
 
+// The embedded Postgres (PGlite) loads its .wasm/.data files from its own folder, so it
+// ships as a regular package next to the bundle. Used only in demo mode (no DATABASE_URL).
+cpSync(path.join(root, "node_modules", "@electric-sql", "pglite"), path.join(fn, "node_modules", "@electric-sql", "pglite"), { recursive: true });
+
 cpSync(path.join(root, "public"), path.join(out, "static"), { recursive: true });
 
 writeFileSync(path.join(out, "config.json"), JSON.stringify({

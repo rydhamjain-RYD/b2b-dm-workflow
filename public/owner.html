@@ -12,6 +12,7 @@
   <h1 id="biz">Owner dashboard</h1>
   <span class="pill" id="ai"></span>
   <span class="pill" id="erp"></span>
+  <span class="pill warn" id="demoPill" hidden title="This public demo runs on a temporary database with sample products. Data resets when the server restarts.">Demo · data resets</span>
   <span class="spacer"></span>
   <button id="syncBtn" title="Expire old holds, resync Tally stock, offer freed stock to the waitlist">Sync now</button>
   <button id="resetBtn" class="danger" title="Wipe all demo data and reload the seed catalog">Reset demo</button>
@@ -70,6 +71,8 @@ async function status() {
   ai.textContent = s.aiMode === "claude" ? "AI: Claude" : "AI: built-in rules";
   ai.className = "pill " + (s.aiMode === "claude" ? "ok" : "");
   document.getElementById("erp").textContent = `ERP: ${s.erp}${s.whatsapp ? " · WhatsApp on" : ""}`;
+  const demo = document.getElementById("demoPill");
+  demo.hidden = !s.demo;
   const na = document.getElementById("nApprovals"); na.hidden = !s.pendingApprovals; na.textContent = s.pendingApprovals;
   const nl = document.getElementById("nAlerts"); nl.hidden = !s.openAlerts; nl.textContent = s.openAlerts;
 }

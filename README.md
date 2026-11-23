@@ -67,6 +67,10 @@ The order flow is a state machine in code. The send function refuses to send a q
 | Instagram, email | Not yet; they plug into the same `handleInbound()` |
 | Access | One shared password (`APP_PASSWORD`) for the dashboard and simulator. Buyers open invoices through unguessable `/i/<token>` links |
 
+## Live demo
+
+https://b2b-dm-workflow.vercel.app runs in **demo mode**: no database is configured, so it uses a temporary in-memory database with the sample catalog. Anyone can try it without a password, and data resets whenever Vercel restarts the server. Adding `DATABASE_URL` and `APP_PASSWORD` to the Vercel project (below) switches it to the permanent, password-protected setup.
+
 ## Deploy: Supabase + Vercel
 
 1. **Supabase.** Copy the *Transaction pooler* connection string (dashboard → Connect) into `.env` as `DATABASE_URL`, with your database password filled in. Then set `APP_PASSWORD`.

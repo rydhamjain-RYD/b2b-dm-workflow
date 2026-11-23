@@ -5,7 +5,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "node:path";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { ROOT, settings, loadBusiness, isProduction } from "./config.ts";
+import { ROOT, settings, loadBusiness, isProduction, isDemo } from "./config.ts";
 import { all, one, run, wipeAll } from "./db.ts";
 import { assistant } from "./ai/index.ts";
 import { erp, syncFromErp } from "./erp/mockTally.ts";
@@ -40,7 +40,8 @@ const digest = (s: string) => createHash("sha256").update(s).digest();
 function requireAccess(req: Request, res: Response, next: NextFunction) {
   const password = process.env.APP_PASSWORD;
   if (!password) {
-    if (isProduction()) return res.status(503).json({ error: "Server is not configured: set APP_PASSWORD." });
+    // The demo holds only sample data, so it is open; a real deployment must have a password.
+    if (isProduction() && !isDemo()) return res.status(503).json({ error: "Server is not configured: set APP_PASSWORD." });
     return next();
   }
   const given = String(req.get("x-access-key") ?? "");
@@ -85,7 +86,8 @@ export function createApp() {
       whatsapp: whatsappEnabled(),
       pendingApprovals: p!.c,
       openAlerts: a!.c,
-      canReset: !isProduction() || process.env.ALLOW_DEMO_RESET === "true",
+      canReset: !isProduction() || isDemo() || process.env.ALLOW_DEMO_RESET === "true",
+      demo: isDemo(),
       holdHours: { draft: settings.draftHoldMs / 3_600_000, quoted: settings.quotedHoldMs / 3_600_000 },
     });
   });
@@ -250,7 +252,7 @@ export function createApp() {
   });
 
   app.post("/api/dev/reset", async (_req, res) => {
-    if (isProduction() && process.env.ALLOW_DEMO_RESET !== "true") return res.status(403).json({ error: "Reset is disabled on this deployment" });
+    if (isProduction() && !isDemo() && process.env.ALLOW_DEMO_RESET !== "true") return res.status(403).json({ error: "Reset is disabled on this deployment" });
     await wipeAll();
     await seedIfEmpty();
     res.json({ ok: true });

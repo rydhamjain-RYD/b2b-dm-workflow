@@ -28,6 +28,13 @@ function minutes(name: string, fallback: number): number {
 
 export const isProduction = (): boolean => process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
 
+/**
+ * Public demo: deployed (on Vercel) without a DATABASE_URL. Runs an in-memory database
+ * with the sample catalog; data resets whenever the server restarts. No password needed.
+ * Adding DATABASE_URL (and APP_PASSWORD) switches to the real, permanent setup.
+ */
+export const isDemo = (): boolean => Boolean(process.env.VERCEL) && !process.env.DATABASE_URL;
+
 export const settings = {
   port: Number(process.env.PORT) || 3000,
   /** Postgres URL (Supabase) in production. Empty = embedded Postgres (PGlite) stored in data/pglite. */
