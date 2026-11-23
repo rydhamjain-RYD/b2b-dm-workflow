@@ -1,0 +1,39 @@
+{
+  "_comment": "Owner-defined billing rules. The engine applies these in a fixed order; the AI never does the arithmetic. Bump `version` whenever you change anything so every quote/invoice records which rules produced it.",
+  "version": "2026-11-23.1",
+  "sellerState": "Maharashtra",
+  "pricesIncludeTax": false,
+  "billDiscountStage": "before_tax",
+  "rounding": "nearest_rupee",
+  "products": {
+    "SW-BOAT-XTEND": {
+      "slabs": [
+        { "minQty": 100, "unitPrice": 1800 },
+        { "minQty": 400, "unitPrice": 1750 }
+      ]
+    },
+    "SW-NOISE-CF4": {
+      "lineDiscountPct": 5
+    },
+    "BT-PET-1L": {
+      "slabs": [{ "minQty": 1000, "unitPrice": 9 }]
+    }
+  },
+  "categories": {
+    "earbuds": { "lineDiscountPct": 3 }
+  },
+  "billDiscounts": [
+    { "minSubtotal": 500000, "pct": 2 },
+    { "minSubtotal": 1000000, "pct": 3 }
+  ],
+  "negotiation": {
+    "_comment": "How the assistant bargains with NEW buyers. Each counter-offer still needs the owner's approval. Steps are % off the quoted bill; it never goes beyond maxDiscountPct (per-product maxDiscountPct can be lower).",
+    "enabled": true,
+    "newClientsOnly": true,
+    "steps": [1.5, 3, 5],
+    "maxDiscountPct": 5,
+    "products": {}
+  },
+  "buyers": {},
+  "cess": {}
+}

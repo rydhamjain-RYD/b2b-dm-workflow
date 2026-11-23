@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buyer Simulator</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/auth.js"></script>
+<style>
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  .layout { flex: 1; display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 0; }
+  .buyers { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; }
+  .buyers button { display: block; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; padding: 12px 14px; background: none; }
+  .buyers button[aria-current="true"] { background: var(--accent-soft); }
+  .buyers .add { padding: 12px 14px; display: grid; gap: 6px; }
+  .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .chathead { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .composer { display: flex; gap: 8px; padding: 10px; background: var(--surface); border-top: 1px solid var(--line); }
+  .composer textarea { flex: 1; min-height: 42px; max-height: 140px; }
+  .chips { display: flex; gap: 6px; padding: 8px 10px 0; background: var(--surface); overflow-x: auto; }
+  .chips button { font-size: 12px; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+  .typing { align-self: flex-start; font-size: 12px; color: var(--muted); padding: 4px 8px; }
+  @media (max-width: 640px) {
+    .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .buyers { display: flex; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--line); }
+    .buyers button { width: auto; white-space: nowrap; border-bottom: none; border-right: 1px solid var(--line); }
+    .buyers .add { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>Buyer DMs</h1>
+  <span class="pill">Simulates WhatsApp / Instagram / email</span>
+  <span class="spacer"></span>
+  <a href="/owner.html" target="_top" class="small">Owner dashboard →</a>
+</div>
+<div class="layout">
+  <nav class="buyers" id="buyers" aria-label="Buyers"></nav>
+  <section class="pane">
+    <div class="chathead"><strong id="who"></strong><span class="pill" id="state">no order yet</span></div>
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <div class="chips" id="chips"></div>
+    <form class="composer" id="form">
+      <textarea id="text" rows="1" placeholder="Type a message as the buyer…" aria-label="Message"></textarea>
+      <button class="primary" type="submit">Send</button>
+    </form>
+  </section>
+</div>
+<script>
+const PRESETS = [
+  { handle: "919800000001", name: "Ravi (Acme Retail)" },
+  { handle: "919800000002", name: "Priya (Bharat Traders)" },
+  { handle: "919800000003", name: "Imran (City Mobiles)" },
+];
+const SUGGEST = [
+  "Hi, we have a requirement",
+  "We need 500 boAt smartwatches",
+  "need 300 boat smartwatch",
+  "200 smartwatches",
+  "Yes, go ahead",
+  "Acme Retail Pvt Ltd, GSTIN 27AAACA1234A1Z5, 12 MG Road, Camp, Pune, Maharashtra 411001, contact: Ravi 9876543210",
+  "Bharat Traders, GSTIN 29AABCB5678B1Z2, 44 Commercial Street, Bengaluru, Karnataka 560001, contact: Priya 9845012345",
+  "yes same address",
+  "Too costly, give best price",
+  "can you do 1750 per piece?",
+  "thoda kam karo, last price?",
+  "where is my order?",
+  "What is the warranty?",
+  "Not interested, thanks",
+];
+let buyers = load("buyers", PRESETS);
+let current = load("current", PRESETS[0].handle);
+let lastCount = -1;
+let busy = false;
+
+function load(k, d) { try { const v = JSON.parse(localStorage.getItem("sim:" + k)); return v ?? d; } catch { return d; } }
+function save(k, v) { try { localStorage.setItem("sim:" + k, JSON.stringify(v)); } catch {} }
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const linkify = (s) => esc(s).replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+const time = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const STATE = {
+  AWAITING_REQUIREMENT: "Collecting requirement", QUOTE_PENDING_APPROVAL: "Quote with owner", AWAITING_BUYER_CONFIRMATION: "Quote sent",
+  AWAITING_DELIVERY: "Awaiting delivery details", BILL_PENDING_APPROVAL: "Bill with owner", WAITLISTED: "Waitlisted", EXPIRED: "Quote expired",
+};
+
+function renderBuyers() {
+  const nav = document.getElementById("buyers");
+  nav.innerHTML = buyers.map((b) => `<button aria-current="${b.handle === current}" data-h="${esc(b.handle)}"><strong>${esc(b.name)}</strong><div class="small muted">${esc(b.handle)}</div></button>`).join("") +
+    `<form class="add" id="add"><span class="small muted">Add a buyer</span><input name="name" placeholder="Name" required><input name="handle" placeholder="Phone / handle" required><button type="submit">Add</button></form>`;
+  nav.querySelectorAll("button[data-h]").forEach((b) => b.onclick = () => { current = b.dataset.h; save("current", current); lastCount = -1; renderBuyers(); refresh(); });
+  document.getElementById("add").onsubmit = (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const b = { name: f.get("name").trim(), handle: f.get("handle").trim() };
+    if (!b.handle || buyers.some((x) => x.handle === b.handle)) return;
+    buyers.push(b); save("buyers", buyers); current = b.handle; save("current", current); lastCount = -1; renderBuyers(); refresh();
+  };
+  document.getElementById("who").textContent = buyers.find((b) => b.handle === current)?.name ?? current;
+}
+
+async function refresh() {
+  try {
+    const r = await apiFetch("/api/sim/conversation?handle=" + encodeURIComponent(current));
+    const data = await r.json();
+    const st = document.getElementById("state");
+    st.textContent = data.order ? `Order #${data.order.id} · ${STATE[data.order.state] ?? data.order.state}` : "no open order";
+    st.className = "pill" + (data.order ? " info" : "");
+    if (data.messages.length === lastCount) return;
+    lastCount = data.messages.length;
+    const chat = document.getElementById("chat");
+    chat.innerHTML = data.messages.length ? data.messages.map((m) => {
+      const tag = m.kind === "quote" ? '<div class="tag">Quote · approved by owner</div>' : m.kind === "invoice" ? '<div class="tag">Invoice · approved by owner</div>' : m.kind === "dispatch" ? '<div class="tag">Dispatch update</div>' : "";
+      return `<div class="bubble ${m.direction}">${tag}${linkify(m.text)}<div class="meta">${time(m.created_at)}</div></div>`;
+    }).join("") : '<div class="empty">Send a message to start a conversation with the seller.</div>';
+    chat.scrollTop = chat.scrollHeight;
+  } catch {}
+}
+
+async function send(text) {
+  if (!text.trim() || busy) return;
+  busy = true;
+  const chat = document.getElementById("chat");
+  chat.insertAdjacentHTML("beforeend", `<div class="bubble in">${linkify(text)}<div class="meta">sending…</div></div><div class="typing" id="typing">Seller's assistant is typing…</div>`);
+  chat.scrollTop = chat.scrollHeight;
+  try {
+    const name = buyers.find((b) => b.handle === current)?.name;
+    await apiFetch("/api/sim/message", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ handle: current, name, text }) });
+  } finally {
+    busy = false;
+    lastCount = -1;
+    await refresh();
+  }
+}
+
+document.getElementById("form").onsubmit = (e) => { e.preventDefault(); const t = document.getElementById("text"); send(t.value); t.value = ""; };
+document.getElementById("text").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); } });
+document.getElementById("chips").innerHTML = SUGGEST.map((s) => `<button type="button" title="${esc(s)}">${esc(s.length > 34 ? s.slice(0, 32) + "…" : s)}</button>`).join("");
+document.querySelectorAll("#chips button").forEach((b, i) => b.onclick = () => send(SUGGEST[i]));
+
+renderBuyers();
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

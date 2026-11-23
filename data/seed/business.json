@@ -1,0 +1,11 @@
+{
+  "name": "Sharma Electronics Wholesale",
+  "gstin": "27ABCDE1234F1Z5",
+  "state": "Maharashtra",
+  "address": "Shop 14, Lamington Road, Grant Road East, Mumbai 400007",
+  "phone": "+91 98200 00000",
+  "invoicePrefix": "SEW/26-27/",
+  "bank": "HDFC Bank, A/c 50200012345678, IFSC HDFC0000123",
+  "paymentTerms": "50% advance, balance before dispatch",
+  "replyTone": "polite, short, professional Indian B2B tone"
+}

@@ -1,0 +1,13 @@
+{
+  "_comment": "Mock Tally stock items. In production this comes from Tally/Zoho via the ERP connector.",
+  "items": [
+    { "sku": "SW-BOAT-XTEND", "name": "boAt Xtend Smartwatch", "brand": "boAt", "category": "smartwatch", "aliases": ["smart watch", "smartwatch", "watch", "xtend"], "unit": "pcs", "unitPrice": 1850, "gstRate": 18, "hsn": "8517", "onHand": 500 },
+    { "sku": "SW-NOISE-CF4", "name": "Noise ColorFit Pro 4 Smartwatch", "brand": "Noise", "category": "smartwatch", "aliases": ["smart watch", "smartwatch", "watch", "colorfit"], "unit": "pcs", "unitPrice": 2100, "gstRate": 18, "hsn": "8517", "onHand": 300 },
+    { "sku": "SW-FB-NINJA", "name": "Fire-Boltt Ninja Call Pro Smartwatch", "brand": "Fire-Boltt", "category": "smartwatch", "aliases": ["smart watch", "smartwatch", "watch", "fireboltt", "fire boltt", "ninja"], "unit": "pcs", "unitPrice": 1250, "gstRate": 18, "hsn": "8517", "onHand": 0 },
+    { "sku": "EB-BOAT-141", "name": "boAt Airdopes 141 Earbuds", "brand": "boAt", "category": "earbuds", "aliases": ["earbuds", "earphones", "tws", "airdopes"], "unit": "pcs", "unitPrice": 999, "gstRate": 18, "hsn": "8518", "onHand": 1200 },
+    { "sku": "PB-MI-20K", "name": "Mi 20000mAh Power Bank", "brand": "Mi", "category": "power bank", "aliases": ["powerbank", "power bank", "battery pack"], "unit": "pcs", "unitPrice": 1499, "gstRate": 18, "hsn": "8507", "onHand": 250 },
+    { "sku": "BT-MILTON-1L", "name": "Milton Thermosteel Bottle 1L", "brand": "Milton", "category": "bottle", "aliases": ["bottle", "bottles", "water bottle", "flask"], "unit": "pcs", "unitPrice": 640, "gstRate": 18, "hsn": "9617", "onHand": 800 },
+    { "sku": "BT-PET-1L", "name": "PET Water Bottle 1L (packaged)", "brand": "Generic", "category": "bottle", "aliases": ["pet bottle", "plastic bottle", "water bottle", "bottle", "bottles"], "unit": "pcs", "unitPrice": 10, "gstRate": 12, "hsn": "3923", "onHand": 5000 },
+    { "sku": "CS-SPIGEN-UNI", "name": "Spigen Universal Phone Case", "brand": "Spigen", "category": "phone case", "aliases": ["phone cover", "mobile cover", "case", "back cover"], "unit": "pcs", "unitPrice": 450, "gstRate": 18, "hsn": "3926", "onHand": 1500 }
+  ]
+}

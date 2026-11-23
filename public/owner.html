@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Owner Dashboard</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/auth.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <h1 id="biz">Owner dashboard</h1>
+  <span class="pill" id="ai"></span>
+  <span class="pill" id="erp"></span>
+  <span class="spacer"></span>
+  <button id="syncBtn" title="Expire old holds, resync Tally stock, offer freed stock to the waitlist">Sync now</button>
+  <button id="resetBtn" class="danger" title="Wipe all demo data and reload the seed catalog">Reset demo</button>
+</div>
+<nav class="tabs" role="tablist">
+  <button role="tab" data-tab="approvals" aria-selected="true">Approvals<span class="badge" id="nApprovals" hidden></span></button>
+  <button role="tab" data-tab="inventory">Inventory</button>
+  <button role="tab" data-tab="dispatch">Dispatch</button>
+  <button role="tab" data-tab="orders">Orders</button>
+  <button role="tab" data-tab="buyers">Buyers</button>
+  <button role="tab" data-tab="alerts">Alerts<span class="badge warn" id="nAlerts" hidden></span></button>
+</nav>
+<main id="main"></main>
+<div class="toast" id="toast" hidden></div>
+<script>
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const inr = (n) => n == null ? "-" : "₹" + Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+const ago = (t) => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? "just now" : s < 3600 ? Math.floor(s / 60) + " min ago" : Math.floor(s / 3600) + " h ago"; };
+const api = async (url, body) => {
+  const r = await apiFetch(url, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+};
+const toast = (msg) => { const t = document.getElementById("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 3500); };
+const STATE = {
+  AWAITING_REQUIREMENT: ["Collecting requirement", ""], QUOTE_PENDING_APPROVAL: ["Quote awaiting you", "warn"], AWAITING_BUYER_CONFIRMATION: ["Quote sent", "info"],
+  AWAITING_DELIVERY: ["Awaiting delivery details", "info"], BILL_PENDING_APPROVAL: ["Bill awaiting you", "warn"], CLOSED: ["Billed · to dispatch", "ok"], DISPATCHED: ["In transit", "info"], DELIVERED: ["Delivered", "ok"],
+  WAITLISTED: ["Waitlisted", ""], EXPIRED: ["Quote expired", "bad"], CANCELLED: ["Cancelled", ""],
+};
+const stateChip = (s) => `<span class="pill ${STATE[s]?.[1] ?? ""}">${esc(STATE[s]?.[0] ?? s)}</span>`;
+
+let tab = "approvals";
+let lastSig = "";
+const drafts = {}; // approval id -> owner's in-progress edit
+let openOrder = null;
+
+document.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => {
+  tab = b.dataset.tab; openOrder = null; lastSig = "";
+  document.querySelectorAll("[data-tab]").forEach((x) => x.setAttribute("aria-selected", x === b));
+  render(true);
+});
+document.getElementById("syncBtn").onclick = async () => {
+  try { const r = await api("/api/owner/sync", {}); toast(`Synced. ${r.expired} hold(s) expired, ${r.offered} waitlist offer(s) drafted.`); render(true); } catch (e) { toast(e.message); }
+};
+document.getElementById("resetBtn").onclick = async () => {
+  if (!confirm("Wipe all demo conversations, orders and stock changes?")) return;
+  await api("/api/dev/reset", {}); toast("Demo data reset."); lastSig = ""; render(true);
+};
+
+async function status() {
+  const s = await api("/api/status");
+  document.getElementById("biz").textContent = s.business;
+  document.getElementById("resetBtn").hidden = !s.canReset;
+  const ai = document.getElementById("ai");
+  ai.textContent = s.aiMode === "claude" ? "AI: Claude" : "AI: built-in rules";
+  ai.className = "pill " + (s.aiMode === "claude" ? "ok" : "");
+  document.getElementById("erp").textContent = `ERP: ${s.erp}${s.whatsapp ? " · WhatsApp on" : ""}`;
+  const na = document.getElementById("nApprovals"); na.hidden = !s.pendingApprovals; na.textContent = s.pendingApprovals;
+  const nl = document.getElementById("nAlerts"); nl.hidden = !s.openAlerts; nl.textContent = s.openAlerts;
+}
+
+async function render(force) {
+  try {
+    await status();
+    const main = document.getElementById("main");
+    if (tab === "approvals") return renderApprovals(main, force);
+    if (openOrder) return renderOrder(main, openOrder);
+    if (tab === "inventory") return renderInventory(main);
+    if (tab === "dispatch") return renderDispatch(main, force);
+    if (tab === "orders") return renderOrders(main);
+    if (tab === "buyers") return renderBuyers(main);
+    if (tab === "alerts") return renderAlerts(main);
+  } catch (e) { console.error(e); }
+}
+
+// ---------- approvals ----------
+const SRC = { list: "list price", slab: "bulk slab price", buyer: "contract price", owner: "your price" };
+const breakdownOf = (a) => (a.gate === "quote" ? a.payload.quote?.breakdown : a.invoice?.breakdown) || null;
+
+function pricedLines(a) {
+  const b = breakdownOf(a);
+  if (a.gate === "quote") {
+    return a.payload.quote.lines.map((l) => {
+      const p = b?.lines.find((x) => x.sku === l.sku);
+      return { sku: l.sku, name: l.name, requested: l.requested, qty: l.offered, unitPrice: p?.unitPrice, priceSource: p?.priceSource, total: p?.total };
+    });
+  }
+  return (b?.lines || []).map((p) => ({ sku: p.sku, name: p.name, requested: p.qty, qty: p.qty, unitPrice: p.unitPrice, priceSource: p.priceSource, total: p.total }));
+}
+
+function linesTable(a) {
+  const b = breakdownOf(a);
+  const rows = pricedLines(a).map((l) => {
+    const qty = a.gate === "bill" || l.qty === l.requested ? `<span class="pill ok">${l.qty}</span>`
+      : l.qty === 0 ? `<span class="pill bad">0 of ${l.requested}</span>` : `<span class="pill warn">${l.qty} of ${l.requested}</span>`;
+    const price = l.qty > 0
+      ? `<input class="price-in" data-price="${esc(l.sku)}" data-orig="${l.unitPrice}" value="${l.unitPrice}" inputmode="decimal" aria-label="Unit price for ${esc(l.name)}">
+         <div class="small muted">${esc(SRC[l.priceSource] ?? "")}${l.priceSource === "owner" ? ` · <button type="button" class="linkish" data-reset-price="${esc(l.sku)}">use normal price</button>` : ""}</div>`
+      : "-";
+    return `<tr><td>${esc(l.name)}<div class="small muted mono">${esc(l.sku)}</div></td><td class="n">${qty}</td><td class="n">${price}</td><td class="n">${l.total != null ? inr(l.total) : "-"}</td></tr>`;
+  }).join("");
+  const t = b?.totals;
+  const totals = t ? `<table class="totals-mini">
+      <tr><td>Subtotal</td><td class="n">${inr(t.subtotal)}</td></tr>
+      ${t.billDiscount ? `<tr><td>Discount (${esc(discountText(t))})</td><td class="n">−${inr(t.billDiscount)}</td></tr>` : ""}
+      ${t.discountsWaived ? `<tr><td colspan="2" class="small muted">All discounts removed</td></tr>` : ""}
+      <tr><td>${b.taxMode === "intra" ? "CGST + SGST" : b.taxMode === "inter" ? "IGST" : "GST"}</td><td class="n">${inr(t.gst)}</td></tr>
+      <tr class="grand"><td>Total</td><td class="n">${inr(t.grandTotal)}</td></tr></table>` : "";
+  const inv = a.gate === "bill" && a.invoice ? `<div class="row small"><span class="pill">${esc(a.invoice.number)}</span><a href="/i/${a.invoice.token}" target="_blank" rel="noopener">Open invoice draft ↗</a></div>` : "";
+  return `${inv}<div class="table-wrap"><table><thead><tr><th>Item</th><th class="n">Qty</th><th class="n">Unit price (₹, edit)</th><th class="n">Line total incl. GST</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${totals}
+    ${b ? `<details><summary>How this was calculated (rules ${esc(b.ruleVersion)})</summary><ol class="steps">${b.steps.map((s) => `<li>${esc(s)}</li>`).join("")}</ol></details>` : ""}`;
+}
+
+function discountText(t) {
+  const parts = [t.tierDiscountPct ? `${t.tierDiscountPct}% order value` : "", t.extraDiscountPct ? `${t.extraDiscountPct}% extra` : "", t.negotiatedPct ? `${t.negotiatedPct}% special price` : ""].filter(Boolean);
+  return parts.length ? parts.join(" + ") : `${t.billDiscountPct}%`;
+}
+
+function negotiationBanner(a) {
+  const n = a.payload.negotiation;
+  if (!n) return "";
+  const asked = n.askUnitPrice ? `asked for ${inr(n.askUnitPrice)} per unit` : n.askPct != null ? `asked for about ${n.askPct}% off` : "did not name a number";
+  if (n.returningBuyer) {
+    return `<div class="warnbox"><strong>Returning client is bargaining.</strong> "${esc(n.buyerText)}" (${asked}). The assistant did not offer anything. Change the price or discount below, or approve to hold the current price.</div>`;
+  }
+  return `<div class="infobox"><strong>Negotiation, round ${n.round}</strong> with a new client. Buyer: "${esc(n.buyerText)}" (${asked}).<br>
+      Assistant proposes <strong>${n.offeredPct}% special price</strong>${n.previousPct ? ` (up from ${n.previousPct}%)` : ""}. Your limit is ${n.maxPct}%.${n.final ? " Worded as the final price." : ""}</div>
+    ${n.overLimit ? `<div class="warnbox">The buyer wants more than your ${n.maxPct}% limit. This draft holds firm; lower the price yourself if you want to go further.</div>` : ""}`;
+}
+
+async function renderApprovals(main, force) {
+  const list = await api("/api/owner/approvals?status=pending");
+  const sig = list.map((a) => a.id + ":" + a.status).join(",");
+  if (!force && sig === lastSig) {
+    main.querySelectorAll("[data-age]").forEach((el) => el.textContent = ago(Number(el.dataset.age)));
+    return;
+  }
+  lastSig = sig;
+  if (!list.length) {
+    main.innerHTML = `<div class="card empty"><strong>Nothing waiting for you.</strong><br>New quotes and bills drafted by the assistant appear here for approval before anything reaches a buyer.</div>`;
+    return;
+  }
+  main.innerHTML = list.map((a) => {
+    const gate = a.gate === "quote" ? (a.payload.negotiation && !a.payload.negotiation.returningBuyer ? '<span class="pill warn">Counter-offer</span>' : '<span class="pill info">Quote</span>') : '<span class="pill ok">Bill</span>';
+    const warnings = (a.payload.warnings || []).map((w) => `<div class="${a.payload.blocking ? "errbox" : "warnbox"}">${esc(w)}</div>`).join("");
+    const hasNeg = a.negotiated_pct > 0 || (a.payload.negotiation && !a.payload.negotiation.returningBuyer);
+    return `<article class="card" data-id="${a.id}">
+      <div class="card-head">${gate}<h2>${esc(a.buyer_name || a.buyer_handle)}</h2><span class="muted small">Order #${a.order_id}</span>
+        ${a.owner_note ? `<span class="pill warn">Redraft after your note</span>` : a.attempt > 1 ? `<span class="pill">Updated draft</span>` : ""}<span class="spacer"></span><span class="small muted" data-age="${a.created_at}">${ago(a.created_at)}</span></div>
+      ${negotiationBanner(a)}
+      ${a.owner_note ? `<div class="warnbox">Your note: ${esc(a.owner_note)}</div>` : ""}
+      ${warnings}
+      <div class="grid2">
+        <div><label class="small muted" for="t${a.id}">Message to the buyer (edit before sending if you like)</label>
+          <textarea id="t${a.id}" rows="15">${esc(drafts[a.id] ?? a.draft_text)}</textarea></div>
+        <div>${linesTable(a)}</div>
+      </div>
+      <div class="pricing-panel">
+        <label>Extra discount <input data-disc inputmode="decimal" placeholder="0" value="${a.extra_discount_pct || ""}" ${a.waive_discounts ? "disabled" : ""}> %</label>
+        ${hasNeg ? `<label>Special price <input data-neg inputmode="decimal" value="${a.negotiated_pct || 0}"> %</label>` : ""}
+        <label class="check"><input type="checkbox" data-waive ${a.waive_discounts ? "checked" : ""}> Remove all discounts</label>
+        <button data-act="apply">Apply changes</button>
+        <span class="small muted" data-hint>Change unit prices or discounts, then apply to re-price the ${a.gate === "quote" ? "quote" : "bill"}.${a.gate === "quote" ? " The bill will use the same prices." : ""}</span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button class="primary" data-act="approve" ${a.payload.blocking ? "disabled" : ""}>Approve &amp; send</button>
+        <span class="spacer" style="flex:1"></span>
+        <input data-note placeholder="What should the assistant change in the wording? e.g. friendlier" style="flex:2;min-width:200px" aria-label="Note for the assistant">
+        <button data-act="reject">Reject &amp; redraft</button>
+      </div>
+    </article>`;
+  }).join("");
+
+  main.querySelectorAll("article[data-id]").forEach((card) => {
+    const id = Number(card.dataset.id);
+    const a = list.find((x) => x.id === id);
+    const ta = card.querySelector("textarea");
+    const disc = card.querySelector("[data-disc]");
+    const negIn = card.querySelector("[data-neg]");
+    const waive = card.querySelector("[data-waive]");
+    const priceIns = [...card.querySelectorAll("[data-price]")];
+    const approveBtn = card.querySelector('[data-act="approve"]');
+    const num = (v) => { const s = String(v).replace(/[₹,%\s]/g, ""); return s === "" ? 0 : Number(s); };
+
+    // Collect what the owner changed but has not applied yet.
+    const pendingChanges = () => {
+      const c = {};
+      const prices = {};
+      for (const inp of priceIns) if (num(inp.value) !== Number(inp.dataset.orig)) prices[inp.dataset.price] = inp.value;
+      if (Object.keys(prices).length) c.prices = prices;
+      if (waive.checked !== Boolean(a.waive_discounts)) c.waiveDiscounts = waive.checked;
+      if (!waive.checked && num(disc.value) !== (a.extra_discount_pct || 0)) c.extraDiscountPct = disc.value;
+      if (negIn && num(negIn.value) !== (a.negotiated_pct || 0)) c.negotiatedPct = negIn.value;
+      return c;
+    };
+    const syncApprove = () => {
+      if (a.payload.blocking) return;
+      const dirty = Object.keys(pendingChanges()).length > 0;
+      approveBtn.disabled = dirty;
+      approveBtn.textContent = dirty ? "Apply changes first" : "Approve & send";
+      card.querySelector('[data-act="apply"]').classList.toggle("primary-outline", dirty);
+    };
+    ta.oninput = () => drafts[id] = ta.value;
+    [disc, negIn, ...priceIns].filter(Boolean).forEach((inp) => {
+      inp.oninput = syncApprove;
+      inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); card.querySelector('[data-act="apply"]').click(); } };
+    });
+    waive.onchange = () => { disc.disabled = waive.checked; if (waive.checked) disc.value = ""; syncApprove(); };
+    card.querySelectorAll("[data-reset-price]").forEach((btn) => btn.onclick = async () => {
+      try { await api(`/api/owner/approvals/${id}/pricing`, { prices: { [btn.dataset.resetPrice]: null } }); delete drafts[id]; toast("Back to the normal price."); }
+      catch (err) { toast(err.message); }
+      lastSig = ""; render(true);
+    });
+    syncApprove();
+
+    card.querySelector('[data-act="apply"]').onclick = async (e) => {
+      const changes = pendingChanges();
+      if (!Object.keys(changes).length) { toast("Nothing changed yet. Edit a unit price or discount first."); return; }
+      for (const v of Object.values(changes.prices || {})) if (!(num(v) > 0)) { toast("Unit prices must be more than zero."); return; }
+      const d = changes.extraDiscountPct !== undefined ? num(changes.extraDiscountPct) : 0;
+      if (!(d >= 0 && d <= 50)) { toast("Discount must be between 0 and 50%."); return; }
+      e.target.disabled = true;
+      try {
+        await api(`/api/owner/approvals/${id}/pricing`, changes);
+        delete drafts[id];
+        toast("Re-priced. Check the new total, then approve.");
+      } catch (err) { toast(err.message); }
+      lastSig = ""; render(true);
+    };
+    approveBtn.onclick = async (e) => {
+      if (Object.keys(pendingChanges()).length) return;
+      e.target.disabled = true;
+      try {
+        const r = await api(`/api/owner/approvals/${id}/approve`, { text: ta.value !== a.draft_text ? ta.value : null });
+        delete drafts[id];
+        toast(r.status === "redrafted" ? "Stock changed before approval, so a fresh draft was created. Please review it." : "Sent to the buyer.");
+      } catch (err) { toast(err.message); }
+      lastSig = ""; render(true);
+    };
+    card.querySelector('[data-act="reject"]').onclick = async (e) => {
+      const note = card.querySelector("[data-note]").value.trim();
+      if (!note) { toast("Write what should change so the assistant knows how to redraft."); card.querySelector("[data-note]").focus(); return; }
+      e.target.disabled = true;
+      try { await api(`/api/owner/approvals/${id}/reject`, { note }); delete drafts[id]; toast("Redrafting…"); }
+      catch (err) { toast(err.message); }
+      lastSig = ""; render(true);
+    };
+  });
+}
+
+// ---------- dispatch ----------
+const fmtDay = (t) => t ? new Date(t).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "-";
+
+function dispatchForm(o, d) {
+  const v = (k) => esc(d?.[k] ?? "");
+  return `<form class="dispatch-form" data-order="${o.id}">
+    <label>Transporter *<input name="transporter" required value="${v("transporter")}" placeholder="e.g. VRL Logistics"></label>
+    <label>Vehicle no. *<input name="vehicleNo" required value="${v("vehicleNo")}" placeholder="MH12AB1234" style="text-transform:uppercase"></label>
+    <label>LR / docket no.<input name="lrNo" value="${v("lrNo")}"></label>
+    <label>E-way bill no.<input name="ewayBillNo" value="${v("ewayBillNo")}" inputmode="numeric" placeholder="12 digits"></label>
+    <label>Driver name<input name="driverName" value="${v("driverName")}"></label>
+    <label>Driver phone<input name="driverPhone" value="${v("driverPhone")}" inputmode="tel"></label>
+    <label>Expected delivery<input name="expectedDelivery" type="date" value="${v("expectedDelivery")}"></label>
+    <label class="wide">Note for the buyer<input name="notes" value="${v("notes")}" placeholder="optional"></label>
+    <div class="wide row"><button class="primary" type="submit">${d ? "Save & send update to buyer" : "Mark dispatched & notify buyer"}</button>
+      ${d ? `<button type="button" data-cancel>Cancel</button>` : ""}</div>
+  </form>`;
+}
+
+let editingDispatch = null;
+let dispatchSig = "";
+async function renderDispatch(main, force) {
+  const rows = await api("/api/owner/dispatch");
+  // Redraw only when the orders changed, so half-typed vehicle details are never wiped by the refresh.
+  const sig = rows.map((o) => `${o.id}:${o.state}:${o.updated_at}`).join(",") + `|${editingDispatch}`;
+  if (!force && sig === dispatchSig) return;
+  dispatchSig = sig;
+  const ready = rows.filter((o) => o.state === "CLOSED");
+  const transit = rows.filter((o) => o.state === "DISPATCHED");
+  const done = rows.filter((o) => o.state === "DELIVERED").slice(0, 20);
+  const buyer = (o) => esc(o.business_name || o.buyer_name || o.buyer_handle);
+  const items = (o) => o.lines.map((l) => `${l.requested} × ${esc(l.name)}`).join(", ");
+  const dest = (o) => esc([o.delivery?.city, o.delivery?.state, o.delivery?.pincode].filter(Boolean).join(", "));
+  main.innerHTML = `
+    <div class="card"><div class="card-head"><h2>Ready to dispatch</h2><span class="small muted">Billed orders. Enter the vehicle details; the buyer gets them on chat and they appear on the invoice.</span></div>
+      ${ready.length ? ready.map((o) => `<div class="dispatch-item"><div class="row"><strong>Order #${o.id}</strong><span>${buyer(o)}</span><span class="small muted">${items(o)}</span><span class="small muted">→ ${dest(o)}</span>
+        ${o.invoice_token ? `<a class="small" href="/i/${o.invoice_token}" target="_blank" rel="noopener">${esc(o.invoice_number)} ↗</a>` : ""}</div>${dispatchForm(o, null)}</div>`).join("") : '<div class="empty">Nothing waiting to be dispatched.</div>'}
+    </div>
+    <div class="card"><div class="card-head"><h2>In transit</h2><span class="small muted">Buyers asking "where is my order?" get these details automatically.</span></div>
+      ${transit.length ? `<div class="table-wrap"><table><thead><tr><th>Order</th><th>Buyer</th><th>Vehicle</th><th>Transporter / LR</th><th>E-way bill</th><th>Driver</th><th>Dispatched</th><th>Expected</th><th></th></tr></thead><tbody>
+        ${transit.map((o) => { const d = o.dispatch; return `<tr><td>#${o.id}</td><td>${buyer(o)}<div class="small muted">→ ${dest(o)}</div></td><td><span class="pill info mono">${esc(d.vehicleNo)}</span></td>
+          <td>${esc(d.transporter)}<div class="small muted">${esc(d.lrNo || "")}</div></td><td class="mono">${esc(d.ewayBillNo || "-")}</td><td>${esc([d.driverName, d.driverPhone].filter(Boolean).join(", ") || "-")}</td>
+          <td>${fmtDay(d.dispatchedAt)}</td><td>${d.expectedDelivery ? fmtDay(d.expectedDelivery) : "-"}</td>
+          <td class="row" style="flex-wrap:nowrap"><button data-edit="${o.id}">Edit</button><button class="primary" data-delivered="${o.id}">Delivered</button></td></tr>
+          ${editingDispatch === o.id ? `<tr><td colspan="9">${dispatchForm(o, d)}</td></tr>` : ""}`; }).join("")}</tbody></table></div>` : '<div class="empty">No orders on the road.</div>'}
+    </div>
+    ${done.length ? `<div class="card"><div class="card-head"><h2>Delivered</h2></div><div class="table-wrap"><table><thead><tr><th>Order</th><th>Buyer</th><th>Vehicle</th><th>Delivered</th></tr></thead><tbody>
+      ${done.map((o) => `<tr><td>#${o.id}</td><td>${buyer(o)}</td><td class="mono">${esc(o.dispatch?.vehicleNo ?? "")}</td><td>${fmtDay(o.dispatch?.deliveredAt)}</td></tr>`).join("")}</tbody></table></div></div>` : ""}`;
+
+  main.querySelectorAll(".dispatch-form").forEach((f) => {
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(f).entries());
+      const btn = f.querySelector('[type="submit"]'); btn.disabled = true;
+      try { await api(`/api/owner/orders/${f.dataset.order}/dispatch`, body); editingDispatch = null; toast("Dispatch details sent to the buyer."); document.activeElement.blur(); }
+      catch (err) { toast(err.message); btn.disabled = false; return; }
+      render(true);
+    };
+    const cancel = f.querySelector("[data-cancel]");
+    if (cancel) cancel.onclick = () => { editingDispatch = null; document.activeElement.blur(); render(true); };
+  });
+  main.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => { editingDispatch = Number(b.dataset.edit); render(true); });
+  main.querySelectorAll("[data-delivered]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Mark order #${b.dataset.delivered} as delivered? The buyer will be told.`)) return;
+    try { await api(`/api/owner/orders/${b.dataset.delivered}/delivered`, {}); toast("Marked delivered."); } catch (err) { toast(err.message); }
+    render(true);
+  });
+}
+
+// ---------- inventory ----------
+async function renderInventory(main) {
+  if (main.contains(document.activeElement) && document.activeElement.matches("input,select")) return;
+  const rows = await api("/api/owner/inventory");
+  const bar = (r) => {
+    const tot = Math.max(r.on_hand, 1);
+    const seg = (v, c) => v ? `<span style="width:${(v / tot) * 100}%;background:${c}"></span>` : "";
+    return `<div class="bar" title="committed ${r.committed}, quoted ${r.quoted_held}, draft ${r.draft_held}, free ${r.atp}">${seg(r.committed, "var(--info)")}${seg(r.quoted_held, "var(--accent)")}${seg(r.draft_held, "var(--warn)")}</div>`;
+  };
+  main.innerHTML = `<div class="card"><div class="card-head"><h2>Available to promise</h2><span class="small muted">What buyers can be offered right now = Tally stock − committed − held quotes. Every chat reads this, never raw stock.</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Product</th><th class="n">Tally stock</th><th class="n">Draft holds</th><th class="n">Quoted holds</th><th class="n">Committed</th><th class="n">Available</th><th class="n">Waitlist</th><th>Usage</th></tr></thead>
+    <tbody>${rows.map((r) => `<tr><td>${esc(r.name)}<div class="small muted mono">${esc(r.sku)}</div></td><td class="n">${r.on_hand}</td><td class="n">${r.draft_held || ""}</td><td class="n">${r.quoted_held || ""}</td>
+      <td class="n">${r.committed || ""}</td><td class="n"><strong>${r.atp}</strong></td><td class="n">${r.waitlisted ? `<span class="pill warn">${r.waitlisted}</span>` : ""}</td><td>${bar(r)}</td></tr>`).join("")}</tbody></table></div>
+    <p class="small muted">Bar: <span style="color:var(--info)">■</span> committed · <span style="color:var(--accent)">■</span> quoted · <span style="color:var(--warn)">■</span> awaiting your approval</p></div>
+    <div class="card"><div class="card-head"><h2>Simulate a change made directly in Tally</h2></div>
+      <p class="small muted">For example, a walk-in sale billed in Tally. The workflow resyncs stock and alerts you if promises now exceed it.</p>
+      <form class="row" id="adj"><select name="sku">${rows.map((r) => `<option value="${esc(r.sku)}">${esc(r.name)}</option>`).join("")}</select>
+      <input name="delta" type="number" step="1" value="-40" style="width:110px" aria-label="Change in units"><button type="submit">Apply in Tally</button></form></div>`;
+  document.getElementById("adj").onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try { const r = await api("/api/owner/erp/adjust", { sku: f.get("sku"), delta: Number(f.get("delta")) }); toast(`Tally stock now ${r.closing}.${r.oversold.length ? " Oversold alert raised." : ""}`); document.activeElement.blur(); render(); }
+    catch (err) { toast(err.message); }
+  };
+}
+
+// ---------- orders ----------
+async function renderOrders(main) {
+  const rows = await api("/api/owner/orders");
+  main.innerHTML = `<div class="card"><div class="card-head"><h2>Orders</h2></div>${rows.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>Buyer</th><th>Items</th><th>Status</th><th class="n">Quoted total</th><th>Updated</th></tr></thead><tbody>
+    ${rows.map((o) => `<tr class="click" data-id="${o.id}"><td>${o.id}${o.origin === "waitlist" ? ' <span class="pill">waitlist</span>' : ""}</td><td>${esc(o.buyer)}</td><td>${o.lines.map((l) => `${l.requested} × ${esc(l.name)}`).join("<br>") || '<span class="muted">-</span>'}</td>
+      <td>${stateChip(o.state)}${o.vehicle ? ` <span class="pill mono">${esc(o.vehicle)}</span>` : ""}</td><td class="n">${inr(o.total)}</td><td class="small muted">${ago(o.updated_at)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">No orders yet. Send a message from the buyer simulator.</div>'}</div>`;
+  main.querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = () => { openOrder = Number(tr.dataset.id); render(); });
+}
+async function renderOrder(main, id) {
+  const d = await api(`/api/owner/orders/${id}`);
+  const o = d.order;
+  main.innerHTML = `<button id="back">← All orders</button>
+    <div class="card" style="margin-top:12px"><div class="card-head"><h2>Order #${o.id} · ${esc(d.buyer.name || d.buyer.handle)}</h2>${stateChip(o.state)}
+      ${d.invoice ? `<a href="/i/${d.invoice.token}" target="_blank" rel="noopener">Invoice ${esc(d.invoice.number)} ↗</a>` : ""}</div>
+      <div class="grid2"><div>
+        <h3 class="small muted">Stock reservations (ledger)</h3>
+        <div class="table-wrap"><table><thead><tr><th>SKU</th><th class="n">Qty</th><th>State</th><th>Expires</th></tr></thead><tbody>
+        ${d.reservations.map((r) => `<tr><td class="mono">${esc(r.sku)}</td><td class="n">${r.qty}</td><td>${esc(r.state)}${r.release_reason ? ` <span class="small muted">(${esc(r.release_reason)})</span>` : ""}</td><td class="small muted">${r.expires_at ? new Date(r.expires_at).toLocaleString() : "-"}</td></tr>`).join("") || '<tr><td colspan="4" class="muted">none</td></tr>'}</tbody></table></div>
+        ${d.waitlist.length ? `<h3 class="small muted">Waitlist</h3>${d.waitlist.map((w) => `<div>${w.qty} × <span class="mono">${esc(w.sku)}</span></div>`).join("")}` : ""}
+        <h3 class="small muted">Approvals</h3>
+        ${d.approvals.map((a) => `<div class="small">${a.gate} draft ${a.attempt}: <strong>${a.status}</strong>${a.owner_note ? ` · "${esc(a.owner_note)}"` : ""}</div>`).join("") || '<div class="muted small">none</div>'}
+      </div><div>
+        <h3 class="small muted">Conversation</h3>
+        <div class="chat" style="max-height:480px;border-radius:8px">${d.messages.map((m) => `<div class="bubble ${m.direction === "in" ? "in" : "out"}">${m.kind === "quote" || m.kind === "invoice" ? `<div class="tag">${m.kind} · approved</div>` : ""}${esc(m.text)}<div class="meta">${new Date(m.created_at).toLocaleTimeString()}</div></div>`).join("")}</div>
+      </div></div></div>`;
+  document.getElementById("back").onclick = () => { openOrder = null; render(); };
+}
+
+// ---------- buyers & alerts ----------
+async function renderBuyers(main) {
+  const rows = await api("/api/owner/buyers");
+  main.innerHTML = `<div class="card"><div class="card-head"><h2>Buyers</h2><span class="small muted">Saved after their first completed sale; next time the assistant only confirms the address.</span></div>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Buyer</th><th>Channel</th><th>GSTIN</th><th>Saved delivery address</th><th class="n">Completed orders</th></tr></thead><tbody>
+    ${rows.map((b) => `<tr><td><strong>${esc(b.business_name || b.name || b.handle)}</strong><div class="small muted">${esc(b.name || "")} · ${esc(b.handle)}</div></td><td>${esc(b.channel)}</td><td class="mono">${esc(b.gstin || "-")}</td>
+      <td class="small" style="white-space:pre-line">${esc(b.address || "-")}</td><td class="n">${b.closed_orders}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty">No buyers yet.</div>'}</div>`;
+}
+async function renderAlerts(main) {
+  const rows = await api("/api/owner/alerts");
+  const kind = { buyer_question: ["Buyer question", "info"], oversold: ["Oversold", "bad"], stock_changed: ["Stock changed", "warn"], hold_lapsed: ["Hold lapsed", "warn"], bill_check: ["Bill check", "warn"], erp_post_failed: ["Tally error", "bad"], delivery_failed: ["Delivery failed", "bad"] };
+  main.innerHTML = `<div class="card"><div class="card-head"><h2>Alerts</h2><span class="small muted">Things the assistant would not decide on its own.</span></div>
+    ${rows.length ? rows.map((a) => `<div class="row" style="padding:10px 0;border-bottom:1px solid var(--line);${a.resolved ? "opacity:.5" : ""}">
+      <span class="pill ${kind[a.kind]?.[1] ?? ""}">${esc(kind[a.kind]?.[0] ?? a.kind)}</span><span style="flex:1;min-width:200px">${esc(a.message)}</span>
+      <span class="small muted">${ago(a.created_at)}</span>${a.resolved ? "" : `<button data-id="${a.id}">Mark done</button>`}</div>`).join("") : '<div class="empty">No alerts.</div>'}</div>`;
+  main.querySelectorAll("button[data-id]").forEach((b) => b.onclick = async () => { await api(`/api/owner/alerts/${b.dataset.id}/resolve`, {}); render(); });
+}
+
+render(true);
+setInterval(() => render(false), 3000);
+</script>
+</body>
+</html>
